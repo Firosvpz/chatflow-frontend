@@ -21,7 +21,7 @@ import {
 import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { getSidebarUsers } from "../api/userApi"
 import AuthModal from "../components/AuthModal"
-import { getMessage, sendMessage, sendMessageWithImage } from "../api/messageApi"
+import { deleteMessage, getMessage, sendMessage, sendMessageWithImage } from "../api/messageApi"
 import { EmojiPickerButton } from "../components/EmojiPickerButton"
 import { disconnectSocket, initSocket } from "../config/socket"
 
@@ -121,6 +121,14 @@ export default function ChatApp() {
           })
         })
 
+        // Listen for message deletion events
+        socketRef.current.on("messageDelete", ({ messageId, deletedBy }) => {
+          console.log("Message deleted event received:", messageId);
+
+          setMessages(prev => prev.filter(msg => msg.id !== messageId));
+
+        });
+
         socketRef.current.on("connect_error", (error) => {
           console.error("Socket connection error:", error)
           setIsSocketConnected(false)
@@ -217,7 +225,7 @@ export default function ChatApp() {
         setIsLoadingContacts(true)
         setContactsError(null)
         const response = await getSidebarUsers()
-        console.log("response", response)
+        // console.log("response", response)
 
         const transformedContacts =
           response.data?.map((user) => ({
@@ -414,21 +422,21 @@ export default function ChatApp() {
 
     try {
       const response = await sendMessageWithImage(selectedContact.id, selectedImage)
-      console.log('image response:',response);
-      
+      console.log('image response:', response);
+
 
       // Update the optimistic message with real data
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === tempId
             ? {
-                ...msg,
-                id: response._id || response?.id || tempId,
-                isPending: false,
-                timestamp: response?.createdAt || msg.timestamp,
-                time: formatMessageTime(response?.createdAt || msg.timestamp),
-                imageUrl: response?.file || msg.imageUrl,
-              }
+              ...msg,
+              id: response._id || response?.id || tempId,
+              isPending: false,
+              timestamp: response?.createdAt || msg.timestamp,
+              time: formatMessageTime(response?.createdAt || msg.timestamp),
+              imageUrl: response?.file || msg.imageUrl,
+            }
             : msg,
         ),
       )
@@ -483,12 +491,12 @@ export default function ChatApp() {
           prev.map((msg) =>
             msg.id === tempId
               ? {
-                  ...msg,
-                  id: response.data.newMessage._id || response.data.id || tempId,
-                  isPending: false,
-                  timestamp: response.data.newMessage.createdAt || msg.timestamp,
-                  time: formatMessageTime(response.data.newMessage.createdAt || msg.timestamp),
-                }
+                ...msg,
+                id: response.data.newMessage._id || response.data.id || tempId,
+                isPending: false,
+                timestamp: response.data.newMessage.createdAt || msg.timestamp,
+                time: formatMessageTime(response.data.newMessage.createdAt || msg.timestamp),
+              }
               : msg,
           ),
         )
@@ -515,6 +523,44 @@ export default function ChatApp() {
     },
     [newMessage, selectedContact, isSendingMessage, currentUser.id],
   )
+
+  // Handle delete message
+  const handleDeleteMessage = useCallback(async (messageId) => {
+    try {
+      // Optimistic update - remove the message immediately
+      setMessages(prev => prev.filter(msg => msg.id !== messageId));
+
+      // Call the API to delete from backend
+      await deleteMessage(messageId);
+
+      // Emit deletion event via socket if connected
+      if (socketRef.current && socketRef.current.connected) {
+        socketRef.current.emit("deleteMessage", {
+          messageId,
+          deletedBy: currentUser.id,
+          receiverId: selectedContact?.id
+        });
+      }
+    } catch (error) {
+      console.error("Failed to delete message:", error);
+      // Optionally: Re-fetch messages to revert UI
+      if (selectedContact) {
+        const response = await getMessage(selectedContact.id);
+        const transformedMessages = response.map((msg) => ({
+          id: msg._id,
+          text: msg.message || "",
+          sender: msg.senderId === currentUser.id ? "me" : "other",
+          time: formatMessageTime(msg.createdAt),
+          timestamp: msg.createdAt,
+          senderId: msg.senderId,
+          receiverId: msg.recieverId || msg.receiverId,
+          imageUrl: msg.file || null,
+          messageType: msg.type || "text",
+        }));
+        setMessages(transformedMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)));
+      }
+    }
+  }, [currentUser.id, selectedContact]);
 
   const handleRetryContacts = useCallback(() => {
     const token = localStorage.getItem("authToken")
@@ -584,9 +630,8 @@ export default function ChatApp() {
 
       {/* Sidebar */}
       <div
-        className={`${
-          sidebarOpen ? "translate-x-0" : "-translate-x-full"
-        } fixed md:relative z-50 md:z-auto w-80 sm:w-96 md:w-80 lg:w-96 h-full md:translate-x-0 transition-all duration-300 bg-white border-r border-gray-200 flex flex-col overflow-hidden shadow-xl`}
+        className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"
+          } fixed md:relative z-50 md:z-auto w-80 sm:w-96 md:w-80 lg:w-96 h-full md:translate-x-0 transition-all duration-300 bg-white border-r border-gray-200 flex flex-col overflow-hidden shadow-xl`}
       >
         {/* Sidebar Header */}
         <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 via-purple-50 to-pink-50 relative overflow-hidden">
@@ -598,9 +643,8 @@ export default function ChatApp() {
                 <MessageCircle className="w-7 h-7 text-white" />
                 {/* Socket connection indicator */}
                 <div
-                  className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
-                    isSocketConnected ? "bg-green-500" : "bg-orange-500"
-                  }`}
+                  className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${isSocketConnected ? "bg-green-500" : "bg-orange-500"
+                    }`}
                   title={isSocketConnected ? "Real-time connected" : "Using fallback mode"}
                 ></div>
               </div>
@@ -684,11 +728,10 @@ export default function ChatApp() {
               <div
                 key={contact.id}
                 onClick={() => handleContactSelect(contact)}
-                className={`p-4 border-b border-gray-100 cursor-pointer transition-all duration-200 hover:bg-gradient-to-r hover:from-blue-50 hover:to-purple-50 active:bg-gradient-to-r active:from-blue-100 active:to-purple-100 relative group ${
-                  selectedContact?.id === contact.id
-                    ? "bg-gradient-to-r from-blue-100 via-purple-50 to-pink-50 border-r-4 border-r-blue-500"
-                    : ""
-                }`}
+                className={`p-4 border-b border-gray-100 cursor-pointer transition-all duration-200 hover:bg-gradient-to-r hover:from-blue-50 hover:to-purple-50 active:bg-gradient-to-r active:from-blue-100 active:to-purple-100 relative group ${selectedContact?.id === contact.id
+                  ? "bg-gradient-to-r from-blue-100 via-purple-50 to-pink-50 border-r-4 border-r-blue-500"
+                  : ""
+                  }`}
               >
                 {/* Hover glow effect */}
                 <div className="absolute inset-0 bg-gradient-to-r from-blue-500/5 via-purple-500/5 to-pink-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-200 rounded-lg"></div>
@@ -711,9 +754,9 @@ export default function ChatApp() {
                       <span className="text-xs text-blue-600 flex-shrink-0 ml-2 font-medium">
                         {contact.lastMessageTime
                           ? new Date(contact.lastMessageTime).toLocaleTimeString("en-IN", {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
                           : contact.lastSeen}
                       </span>
                     </div>
@@ -762,7 +805,7 @@ export default function ChatApp() {
                       {isSocketConnected ? (
                         <span className="ml-2 text-xs text-green-600">Online</span>
                       ) : (
-                        <span className="ml-2 text-xs text-orange-600">Sync</span>
+                        <span className="ml-2 text-xs text-orange-600">Offline</span>
                       )}
                     </p>
                   </div>
@@ -803,9 +846,8 @@ export default function ChatApp() {
                 messages.map((message, index) => (
                   <div
                     key={message.id}
-                    className={`flex items-end space-x-2 animate-fade-in-up ${
-                      message.sender === "me" ? "flex-row-reverse space-x-reverse" : ""
-                    }`}
+                    className={`flex items-end space-x-2 animate-fade-in-up ${message.sender === "me" ? "flex-row-reverse space-x-reverse" : ""
+                      }`}
                     style={{ animationDelay: `${index * 50}ms` }}
                   >
                     <img
@@ -818,12 +860,22 @@ export default function ChatApp() {
                       className="w-8 h-8 rounded-full object-cover flex-shrink-0 ring-2 ring-blue-200 shadow-md"
                     />
                     <div
-                      className={`max-w-[75%] sm:max-w-xs lg:max-w-md px-4 py-3 rounded-2xl shadow-lg relative ${
-                        message.sender === "me"
-                          ? "bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white rounded-br-md border border-blue-300 shadow-blue-500/25"
-                          : "bg-white text-gray-800 rounded-bl-md border border-gray-200 shadow-gray-500/10"
-                      } ${message.isPending ? "opacity-70" : ""}`}
+                      className={`max-w-[75%] sm:max-w-xs lg:max-w-md px-4 py-3 rounded-2xl shadow-lg relative ${message.sender === "me"
+                        ? "bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white rounded-br-md border border-blue-300 shadow-blue-500/25"
+                        : "bg-white text-gray-800 rounded-bl-md border border-gray-200 shadow-gray-500/10"
+                        } ${message.isPending ? "opacity-70" : ""}`}
                     >
+                      {/* Delete button (only for your own messages) */}
+                      {message.sender === "me" && (
+                        <button
+                          onClick={() => handleDeleteMessage(message.id)}
+                          className="absolute -top-2 -right-2 p-1 bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 hover:bg-red-600 shadow-md"
+                          title="Delete message"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+
                       {/* Message Content */}
                       {message.messageType === "image" ? (
                         <div className="space-y-2">
@@ -838,9 +890,8 @@ export default function ChatApp() {
                           {/* Time */}
                           <div className="flex items-center justify-end gap-1">
                             <span
-                              className={`text-xs whitespace-nowrap ${
-                                message.sender === "me" ? "text-white/80" : "text-gray-500"
-                              }`}
+                              className={`text-xs whitespace-nowrap ${message.sender === "me" ? "text-white/80" : "text-gray-500"
+                                }`}
                             >
                               {message.time}
                             </span>
@@ -853,9 +904,8 @@ export default function ChatApp() {
                           <p className="text-sm leading-relaxed break-words flex-1">{message.text}</p>
                           <div className="flex items-center gap-1 flex-shrink-0">
                             <span
-                              className={`text-xs whitespace-nowrap ${
-                                message.sender === "me" ? "text-white/80" : "text-gray-500"
-                              }`}
+                              className={`text-xs whitespace-nowrap ${message.sender === "me" ? "text-white/80" : "text-gray-500"
+                                }`}
                             >
                               {message.time}
                             </span>

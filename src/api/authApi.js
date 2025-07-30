@@ -20,7 +20,7 @@ export const register = async (userData) => {
 
 export const verifyOtp = async (authData) => {
     try {
-        const response =  await axios.post(`${BASE_URL}/verifyOtp`, authData)
+        const response = await axios.post(`${BASE_URL}/verifyOtp`, authData)
         return response
     } catch (error) {
         console.error("Error occurred while verifying otp:", error);

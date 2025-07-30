@@ -17,13 +17,63 @@ import {
   Sun,
   ImageIcon,
   X,
+  Trash2,
 } from "lucide-react"
 import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { getSidebarUsers } from "../api/userApi"
 import AuthModal from "../components/AuthModal"
-import { getMessage, sendMessage, sendMessageWithImage } from "../api/messageApi"
+import { deleteMessage, getMessage, sendMessage, sendMessageWithImage } from "../api/messageApi"
 import { EmojiPickerButton } from "../components/EmojiPickerButton"
 import { disconnectSocket, initSocket } from "../config/socket"
+import { ToastContainer, toast } from "react-toastify"
+
+// Confirmation Modal Component
+function ConfirmationModal({
+  isOpen,
+  onConfirm,
+  onCancel,
+  title,
+  message,
+  confirmText = "Delete",
+  cancelText = "Cancel",
+}) {
+  if (!isOpen) return null
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full mx-4 overflow-hidden animate-scale-in">
+        {/* Header */}
+        <div className="p-6 border-b border-gray-100">
+          <div className="flex items-center space-x-3">
+            <div className="w-12 h-12 bg-red-100 rounded-2xl flex items-center justify-center">
+              <Trash2 className="w-6 h-6 text-red-600" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
+              <p className="text-sm text-gray-500 mt-1">{message}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="p-6 flex space-x-3">
+          <button
+            onClick={onCancel}
+            className="flex-1 px-4 py-3 bg-gray-100 text-gray-700 rounded-2xl hover:bg-gray-200 transition-all duration-200 font-medium"
+          >
+            {cancelText}
+          </button>
+          <button
+            onClick={onConfirm}
+            className="flex-1 px-4 py-3 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-2xl hover:from-red-600 hover:to-red-700 transition-all duration-200 font-medium shadow-lg shadow-red-500/25"
+          >
+            {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function ChatApp() {
   const [selectedContact, setSelectedContact] = useState(null)
@@ -46,6 +96,10 @@ export default function ChatApp() {
   const [selectedImage, setSelectedImage] = useState(null)
   const [isUploadingImage, setIsUploadingImage] = useState(false)
   const [imagePreview, setImagePreview] = useState(null)
+
+  // Toast and confirmation states
+  const [confirmModal, setConfirmModal] = useState({ isOpen: false, messageId: null })
+  const [deletingMessageId, setDeletingMessageId] = useState(null)
 
   const messagesEndRef = useRef(null)
   const imageInputRef = useRef(null)
@@ -71,21 +125,35 @@ export default function ChatApp() {
     if (token && currentUser.id && !showAuthModal) {
       try {
         socketRef.current = initSocket(currentUser.id)
+        socketRef.current.emit('join', currentUser.id);
+        if (selectedContact) {
+          const conversationId = [currentUser.id, selectedContact.id]
+            .sort().join('-');
+          socketRef.current.emit('joinConversation', conversationId);
+        }
+        // Emit deletion event via socket if connected
+        socketRef.current.on("messageDeleted", ({ messageId, conversationId }) => {
+          console.log("Message deleted event received", { messageId, conversationId });
 
+          setMessages(prev => prev.filter(msg => msg.id !== messageId));
+
+
+        });
         socketRef.current.on("connect", () => {
           console.log("Socket connected successfully")
           setIsSocketConnected(true)
+          // toast.success("Connected to real-time messaging")
         })
 
         socketRef.current.on("disconnect", (reason) => {
           console.log("Socket disconnected:", reason)
           setIsSocketConnected(false)
+          // toast.warn("Connection lost, using sync mode")
         })
 
         // Listen for incoming messages
         socketRef.current.on("sendMessage", (newMessage) => {
           console.log("Received new message:", newMessage)
-
           const transformedMessage = {
             id: newMessage._id,
             text: newMessage.message || "",
@@ -105,7 +173,6 @@ export default function ChatApp() {
             if (messageExists) {
               return prevMessages
             }
-
             // Add message if it's part of current conversation
             if (
               selectedContact &&
@@ -116,28 +183,42 @@ export default function ChatApp() {
               const updatedMessages = [...prevMessages, transformedMessage]
               return updatedMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
             }
-
             return prevMessages
           })
+        })
+
+        // Listen for message deletion events
+        socketRef.current.on("messageDeleted", ({ messageId, deletedBy }) => {
+          console.log("Message deleted event received:", messageId)
+
+          setMessages((prev) => prev.filter((msg) => msg.id !== messageId))
+
+          if (deletedBy !== currentUser.id) {
+            // toast.info("A message was deleted")
+          }
         })
 
         socketRef.current.on("connect_error", (error) => {
           console.error("Socket connection error:", error)
           setIsSocketConnected(false)
+          // toast.error("Connection failed")
         })
 
         socketRef.current.on("reconnect", () => {
           console.log("Socket reconnected")
           setIsSocketConnected(true)
+          // toast.success("Reconnected successfully")
         })
 
         socketRef.current.on("reconnect_failed", () => {
           console.error("Socket reconnection failed")
           setIsSocketConnected(false)
+          // toast.error("Reconnection failed")
         })
       } catch (error) {
         console.error("Failed to initialize socket:", error)
         setIsSocketConnected(false)
+        // toast.error("Failed to connect")
       }
     }
 
@@ -146,6 +227,7 @@ export default function ChatApp() {
         socketRef.current.off("connect")
         socketRef.current.off("disconnect")
         socketRef.current.off("sendMessage")
+        socketRef.current.off("messageDeleted")
         socketRef.current.off("connect_error")
         socketRef.current.off("reconnect")
         socketRef.current.off("reconnect_failed")
@@ -158,13 +240,11 @@ export default function ChatApp() {
   // Fallback polling when socket is disconnected
   useEffect(() => {
     let pollingInterval = null
-
     if (selectedContact && !showAuthModal && !isSocketConnected) {
       console.log("Socket disconnected, falling back to polling")
       pollingInterval = setInterval(async () => {
         try {
           const response = await getMessage(selectedContact.id)
-
           const transformedMessages = response.map((msg) => ({
             id: msg._id,
             text: msg.message || "",
@@ -176,9 +256,7 @@ export default function ChatApp() {
             imageUrl: msg.file || null,
             messageType: msg.type || "text",
           }))
-
           transformedMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-
           setMessages((prevMessages) => {
             if (
               JSON.stringify(prevMessages.map((m) => m.id)) !== JSON.stringify(transformedMessages.map((m) => m.id))
@@ -217,7 +295,6 @@ export default function ChatApp() {
         setIsLoadingContacts(true)
         setContactsError(null)
         const response = await getSidebarUsers()
-        // console.log("response", response)
 
         const transformedContacts =
           response.data?.map((user) => ({
@@ -242,6 +319,7 @@ export default function ChatApp() {
       } catch (error) {
         console.error("Error fetching contacts:", error)
         setContactsError(error.message || "Failed to load contacts")
+        toast.error("Failed to load contacts")
       } finally {
         setIsLoadingContacts(false)
       }
@@ -277,7 +355,6 @@ export default function ChatApp() {
       try {
         setIsLoadingMessages(true)
         const response = await getMessage(selectedContact.id)
-
         const transformedMessages = response.map((msg) => ({
           id: msg._id,
           text: msg.message || "",
@@ -289,12 +366,12 @@ export default function ChatApp() {
           imageUrl: msg.file || null,
           messageType: msg.type || "text",
         }))
-
         transformedMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
         setMessages(transformedMessages)
       } catch (error) {
         console.error("Error fetching messages:", error)
         setMessages([])
+        toast.error("Failed to load messages")
       } finally {
         setIsLoadingMessages(false)
       }
@@ -308,6 +385,7 @@ export default function ChatApp() {
     const date = new Date(timestamp)
     const now = new Date()
     const diffInHours = (now - date) / (1000 * 60 * 60)
+
     if (diffInHours < 24) {
       return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     } else if (diffInHours < 48) {
@@ -366,19 +444,18 @@ export default function ChatApp() {
     if (file) {
       // Validate file type - only images
       if (!file.type.startsWith("image/")) {
-        alert("Please select an image file (JPG, PNG, GIF)")
+        toast.error("Please select an image file (JPG, PNG, GIF)")
         return
       }
 
       // Validate file size (5MB limit to match backend)
       const maxSize = 5 * 1024 * 1024 // 5MB
       if (file.size > maxSize) {
-        alert("Image size should be less than 5MB")
+        toast.error("Image size should be less than 5MB")
         return
       }
 
       setSelectedImage(file)
-
       // Create preview
       const reader = new FileReader()
       reader.onload = (e) => {
@@ -414,21 +491,20 @@ export default function ChatApp() {
 
     try {
       const response = await sendMessageWithImage(selectedContact.id, selectedImage)
-      console.log('image response:',response);
-      
+      console.log("image response:", response)
 
       // Update the optimistic message with real data
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === tempId
             ? {
-                ...msg,
-                id: response._id || response?.id || tempId,
-                isPending: false,
-                timestamp: response?.createdAt || msg.timestamp,
-                time: formatMessageTime(response?.createdAt || msg.timestamp),
-                imageUrl: response?.file || msg.imageUrl,
-              }
+              ...msg,
+              id: response._id || response?.id || tempId,
+              isPending: false,
+              timestamp: response?.createdAt || msg.timestamp,
+              time: formatMessageTime(response?.createdAt || msg.timestamp),
+              imageUrl: response?.file || msg.imageUrl,
+            }
             : msg,
         ),
       )
@@ -439,10 +515,12 @@ export default function ChatApp() {
       if (imageInputRef.current) {
         imageInputRef.current.value = ""
       }
+
+      toast.success("Image sent successfully")
     } catch (error) {
       console.error("Error uploading image:", error)
       setMessages((prev) => prev.filter((msg) => msg.id !== tempId))
-      alert("Failed to upload image. Please try again.")
+      toast.error("Failed to upload image. Please try again.")
     } finally {
       setIsUploadingImage(false)
     }
@@ -483,17 +561,17 @@ export default function ChatApp() {
           prev.map((msg) =>
             msg.id === tempId
               ? {
-                  ...msg,
-                  id: response.data.newMessage._id || response.data.id || tempId,
-                  isPending: false,
-                  timestamp: response.data.newMessage.createdAt || msg.timestamp,
-                  time: formatMessageTime(response.data.newMessage.createdAt || msg.timestamp),
-                }
+                ...msg,
+                id: response.data.newMessage._id || response.data.id || tempId,
+                isPending: false,
+                timestamp: response.data.newMessage.createdAt || msg.timestamp,
+                time: formatMessageTime(response.data.newMessage.createdAt || msg.timestamp),
+              }
               : msg,
           ),
         )
 
-        // In handleSendMessage, after the API call succeeds, add this:
+        // Emit via socket if connected
         if (socketRef.current && socketRef.current.connected) {
           socketRef.current.emit("sendMessage", {
             _id: response.data.newMessage._id,
@@ -507,7 +585,7 @@ export default function ChatApp() {
       } catch (error) {
         console.error("Error sending message:", error)
         setMessages((prev) => prev.filter((msg) => msg.id !== tempId))
-        alert("Failed to send message. Please try again.")
+        toast.error("Failed to send message. Please try again.")
         setNewMessage(messageText)
       } finally {
         setIsSendingMessage(false)
@@ -515,6 +593,64 @@ export default function ChatApp() {
     },
     [newMessage, selectedContact, isSendingMessage, currentUser.id],
   )
+
+  // Handle delete message confirmation
+  const handleDeleteMessageClick = useCallback((messageId) => {
+    setConfirmModal({ isOpen: true, messageId })
+  }, [])
+
+  // Handle confirmed delete message
+  const handleConfirmDeleteMessage = useCallback(async () => {
+    const { messageId } = confirmModal
+    if (!messageId) return
+
+    setDeletingMessageId(messageId)
+    setConfirmModal({ isOpen: false, messageId: null })
+
+    try {
+      // Optimistic update - remove the message immediately
+      setMessages((prev) => prev.filter((msg) => msg.id !== messageId))
+
+
+      // Call the API to delete from backend
+      await deleteMessage(messageId)
+
+
+
+      // toast.success("Message deleted successfully")
+    } catch (error) {
+      console.error("Failed to delete message:", error)
+      // toast.error("Failed to delete message")
+
+      // Revert UI by re-fetching messages
+      if (selectedContact) {
+        try {
+          const response = await getMessage(selectedContact.id)
+          const transformedMessages = response.map((msg) => ({
+            id: msg._id,
+            text: msg.message || "",
+            sender: msg.senderId === currentUser.id ? "me" : "other",
+            time: formatMessageTime(msg.createdAt),
+            timestamp: msg.createdAt,
+            senderId: msg.senderId,
+            receiverId: msg.recieverId || msg.receiverId,
+            imageUrl: msg.file || null,
+            messageType: msg.type || "text",
+          }))
+          setMessages(transformedMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)))
+        } catch (refetchError) {
+          console.error("Failed to refetch messages:", refetchError)
+        }
+      }
+    } finally {
+      setDeletingMessageId(null)
+    }
+  }, [confirmModal, currentUser.id, selectedContact])
+
+  // Handle cancel delete
+  const handleCancelDelete = useCallback(() => {
+    setConfirmModal({ isOpen: false, messageId: null })
+  }, [])
 
   const handleRetryContacts = useCallback(() => {
     const token = localStorage.getItem("authToken")
@@ -566,6 +702,31 @@ export default function ChatApp() {
 
   return (
     <div className="h-screen bg-white flex overflow-hidden relative">
+      {/* Toast Notification */}
+      <ToastContainer
+        position="top-right"
+        autoClose={3000}
+        hideProgressBar={false}
+        newestOnTop={false}
+        closeOnClick
+        rtl={false}
+        pauseOnFocusLoss
+        draggable
+        pauseOnHover
+        theme="light"
+      />
+
+      {/* Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={confirmModal.isOpen}
+        onConfirm={handleConfirmDeleteMessage}
+        onCancel={handleCancelDelete}
+        title="Delete Message"
+        message="Are you sure you want to delete this message? This action cannot be undone."
+        confirmText="Delete"
+        cancelText="Cancel"
+      />
+
       {/* Decorative background elements */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-10 left-10 w-32 h-32 bg-gradient-to-br from-blue-100 to-purple-100 rounded-full opacity-60"></div>
@@ -584,23 +745,22 @@ export default function ChatApp() {
 
       {/* Sidebar */}
       <div
-        className={`${
-          sidebarOpen ? "translate-x-0" : "-translate-x-full"
-        } fixed md:relative z-50 md:z-auto w-80 sm:w-96 md:w-80 lg:w-96 h-full md:translate-x-0 transition-all duration-300 bg-white border-r border-gray-200 flex flex-col overflow-hidden shadow-xl`}
+        className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"
+          } fixed md:relative z-50 md:z-auto w-80 sm:w-96 md:w-80 lg:w-96 h-full md:translate-x-0 transition-all duration-300 bg-white border-r border-gray-200 flex flex-col overflow-hidden shadow-xl`}
       >
         {/* Sidebar Header */}
         <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 via-purple-50 to-pink-50 relative overflow-hidden">
           {/* Colorful accent line */}
           <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500"></div>
+
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center space-x-3">
               <div className="w-12 h-12 bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/25 relative">
                 <MessageCircle className="w-7 h-7 text-white" />
                 {/* Socket connection indicator */}
                 <div
-                  className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
-                    isSocketConnected ? "bg-green-500" : "bg-orange-500"
-                  }`}
+                  className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${isSocketConnected ? "bg-green-500" : "bg-orange-500"
+                    }`}
                   title={isSocketConnected ? "Real-time connected" : "Using fallback mode"}
                 ></div>
               </div>
@@ -611,6 +771,7 @@ export default function ChatApp() {
                 <p className="text-xs text-gray-500">{isSocketConnected ? "Real-time connected" : "Fallback mode"}</p>
               </div>
             </div>
+
             <div className="flex space-x-2">
               <button
                 onClick={() => setNotifications(!notifications)}
@@ -631,6 +792,7 @@ export default function ChatApp() {
               )}
             </div>
           </div>
+
           {/* Search */}
           <div className="relative">
             <input
@@ -684,14 +846,14 @@ export default function ChatApp() {
               <div
                 key={contact.id}
                 onClick={() => handleContactSelect(contact)}
-                className={`p-4 border-b border-gray-100 cursor-pointer transition-all duration-200 hover:bg-gradient-to-r hover:from-blue-50 hover:to-purple-50 active:bg-gradient-to-r active:from-blue-100 active:to-purple-100 relative group ${
-                  selectedContact?.id === contact.id
-                    ? "bg-gradient-to-r from-blue-100 via-purple-50 to-pink-50 border-r-4 border-r-blue-500"
-                    : ""
-                }`}
+                className={`p-4 border-b border-gray-100 cursor-pointer transition-all duration-200 hover:bg-gradient-to-r hover:from-blue-50 hover:to-purple-50 active:bg-gradient-to-r active:from-blue-100 active:to-purple-100 relative group ${selectedContact?.id === contact.id
+                  ? "bg-gradient-to-r from-blue-100 via-purple-50 to-pink-50 border-r-4 border-r-blue-500"
+                  : ""
+                  }`}
               >
                 {/* Hover glow effect */}
                 <div className="absolute inset-0 bg-gradient-to-r from-blue-500/5 via-purple-500/5 to-pink-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-200 rounded-lg"></div>
+
                 <div className="flex items-center space-x-3 relative z-10">
                   <div className="relative flex-shrink-0">
                     <img
@@ -705,15 +867,16 @@ export default function ChatApp() {
                       </div>
                     )}
                   </div>
+
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-1">
                       <h3 className="font-semibold text-gray-900 truncate text-base">{contact.name}</h3>
                       <span className="text-xs text-blue-600 flex-shrink-0 ml-2 font-medium">
                         {contact.lastMessageTime
                           ? new Date(contact.lastMessageTime).toLocaleTimeString("en-IN", {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
                           : contact.lastSeen}
                       </span>
                     </div>
@@ -734,6 +897,7 @@ export default function ChatApp() {
             <div className="bg-white border-b border-gray-200 p-4 shadow-sm relative overflow-hidden">
               {/* Colorful accent line */}
               <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500"></div>
+
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-3 min-w-0">
                   <button
@@ -742,6 +906,7 @@ export default function ChatApp() {
                   >
                     <span className="text-gray-600">☰</span>
                   </button>
+
                   <div className="relative flex-shrink-0">
                     <img
                       src={selectedContact.image || "/placeholder.svg"}
@@ -754,11 +919,10 @@ export default function ChatApp() {
                       )} rounded-full border-2 border-white`}
                     ></div>
                   </div>
+
                   <div className="min-w-0 flex-1">
                     <h2 className="font-semibold text-gray-900 truncate text-base">{selectedContact.name}</h2>
                     <p className="text-sm text-blue-600 capitalize flex items-center">
-                      {/* <span className={`w-2 h-2 rounded-full mr-2 ${getStatusColor(selectedContact.status)}`}></span> */}
-                      {/* {selectedContact.status} */}
                       {isSocketConnected ? (
                         <span className="ml-2 text-xs text-green-600">Online</span>
                       ) : (
@@ -767,6 +931,7 @@ export default function ChatApp() {
                     </p>
                   </div>
                 </div>
+
                 <div className="flex space-x-2 flex-shrink-0">
                   <button className="p-2.5 hover:bg-green-100 rounded-xl transition-all duration-200 border border-green-200 hover:border-green-300 hover:shadow-md">
                     <Phone className="text-green-600 w-5 h-5" />
@@ -803,9 +968,8 @@ export default function ChatApp() {
                 messages.map((message, index) => (
                   <div
                     key={message.id}
-                    className={`flex items-end space-x-2 animate-fade-in-up ${
-                      message.sender === "me" ? "flex-row-reverse space-x-reverse" : ""
-                    }`}
+                    className={`flex items-end space-x-2 animate-fade-in-up group ${message.sender === "me" ? "flex-row-reverse space-x-reverse" : ""
+                      }`}
                     style={{ animationDelay: `${index * 50}ms` }}
                   >
                     <img
@@ -814,16 +978,32 @@ export default function ChatApp() {
                           ? currentUser.image || "/placeholder.svg?height=32&width=32&text=Me"
                           : selectedContact.image
                       }
-                      alt="image"
+                      alt="avatar"
                       className="w-8 h-8 rounded-full object-cover flex-shrink-0 ring-2 ring-blue-200 shadow-md"
                     />
+
                     <div
-                      className={`max-w-[75%] sm:max-w-xs lg:max-w-md px-4 py-3 rounded-2xl shadow-lg relative ${
-                        message.sender === "me"
-                          ? "bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white rounded-br-md border border-blue-300 shadow-blue-500/25"
-                          : "bg-white text-gray-800 rounded-bl-md border border-gray-200 shadow-gray-500/10"
-                      } ${message.isPending ? "opacity-70" : ""}`}
+                      className={`max-w-[75%] sm:max-w-xs lg:max-w-md px-4 py-3 rounded-2xl shadow-lg relative ${message.sender === "me"
+                        ? "bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white rounded-br-md border border-blue-300 shadow-blue-500/25"
+                        : "bg-white text-gray-800 rounded-bl-md border border-gray-200 shadow-gray-500/10"
+                        } ${message.isPending ? "opacity-70" : ""} ${deletingMessageId === message.id ? "opacity-50" : ""}`}
                     >
+                      {/* Delete button (only for your own messages) */}
+                      {message.sender === "me" && !message.isPending && (
+                        <button
+                          onClick={() => handleDeleteMessageClick(message.id)}
+                          disabled={deletingMessageId === message.id}
+                          className="absolute -top-2 -right-2 p-1.5 bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-all duration-200 hover:bg-red-600 shadow-lg hover:scale-110 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Delete message"
+                        >
+                          {deletingMessageId === message.id ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3 h-3" />
+                          )}
+                        </button>
+                      )}
+
                       {/* Message Content */}
                       {message.messageType === "image" ? (
                         <div className="space-y-2">
@@ -834,13 +1014,11 @@ export default function ChatApp() {
                             className="max-w-full h-auto rounded-lg cursor-pointer hover:opacity-90 transition-opacity max-h-64 object-cover"
                             onClick={() => window.open(message.imageUrl, "_blank")}
                           />
-
                           {/* Time */}
                           <div className="flex items-center justify-end gap-1">
                             <span
-                              className={`text-xs whitespace-nowrap ${
-                                message.sender === "me" ? "text-white/80" : "text-gray-500"
-                              }`}
+                              className={`text-xs whitespace-nowrap ${message.sender === "me" ? "text-white/80" : "text-gray-500"
+                                }`}
                             >
                               {message.time}
                             </span>
@@ -853,9 +1031,8 @@ export default function ChatApp() {
                           <p className="text-sm leading-relaxed break-words flex-1">{message.text}</p>
                           <div className="flex items-center gap-1 flex-shrink-0">
                             <span
-                              className={`text-xs whitespace-nowrap ${
-                                message.sender === "me" ? "text-white/80" : "text-gray-500"
-                              }`}
+                              className={`text-xs whitespace-nowrap ${message.sender === "me" ? "text-white/80" : "text-gray-500"
+                                }`}
                             >
                               {message.time}
                             </span>
@@ -873,7 +1050,7 @@ export default function ChatApp() {
                 <div className="flex items-end space-x-2 animate-fade-in-up">
                   <img
                     src={selectedContact.image || "/placeholder.svg"}
-                    alt="image"
+                    alt="avatar"
                     className="w-8 h-8 rounded-full object-cover flex-shrink-0 ring-2 ring-blue-200 shadow-md"
                   />
                   <div className="bg-white px-4 py-3 rounded-2xl rounded-bl-md shadow-lg border border-gray-200">
@@ -891,6 +1068,7 @@ export default function ChatApp() {
                   </div>
                 </div>
               )}
+
               <div ref={messagesEndRef} />
             </div>
 
@@ -939,6 +1117,7 @@ export default function ChatApp() {
             <div className="bg-white border-t border-gray-200 p-4 shadow-sm relative overflow-hidden">
               {/* Colorful accent line */}
               <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500"></div>
+
               <form onSubmit={handleSendMessage} className="flex items-center space-x-3">
                 {/* Hidden image input */}
                 <input
@@ -1011,6 +1190,7 @@ export default function ChatApp() {
           </div>
         )}
       </div>
+
       <AuthModal isOpen={showAuthModal} onClose={handleAuthSuccess} />
     </div>
   )
