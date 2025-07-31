@@ -324,7 +324,7 @@ export default function ChatApp() {
       } catch (error) {
         console.error("Error fetching messages:", error)
         setMessages([])
-        toast.error("Failed to load messages")
+       
       } finally {
         setIsLoadingMessages(false)
       }
