@@ -1,4 +1,5 @@
 import axios from "axios";
+import { disconnectSocket } from "../config/socket";
 const BASE_URL = import.meta.env.VITE_BASE_URL;
 
 export const register = async (userData) => {
@@ -36,4 +37,16 @@ export const loginUser = async (userData) => {
         console.error("Error occurred while login user:", error);
         throw error;
     }
+}
+
+export const logoutUser = () => {
+  try {
+    localStorage.removeItem("authToken")
+    localStorage.removeItem("userData")
+    disconnectSocket()
+    console.log("User logged out successfully.")
+  } catch (error) {
+    console.error("Logout error:", error)
+    throw error
+  }
 }
